@@ -1,6 +1,5 @@
 """
-AI PDF Q&A System - Streamlit app
-Save as: app.py
+Smart PDF Question Answering System
 Run: streamlit run app.py
 """
 
@@ -19,12 +18,6 @@ import numpy as np
 from transformers import T5Tokenizer, T5ForConditionalGeneration
 import torch
 
-# Optional OpenAI
-try:
-    import openai
-except Exception:
-    openai = None
-
 # ================= CONFIG =================
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 T5_MODEL_NAME = "google/flan-t5-small"
@@ -37,167 +30,161 @@ INDEX_PATH = os.path.join(INDEX_DIR, "index.faiss")
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 100
 TOP_K = 3
-# =========================================
+# ==========================================
 
-# ============== SESSION ===================
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-# =========================================
+# ================= PAGE UI =================
+st.set_page_config(
+    page_title="Smart PDF Assistant",
+    page_icon="📄",
+    layout="wide"
+)
 
-# ============== MODELS ====================
+st.markdown("""
+<style>
+.main-title {font-size:38px;font-weight:800;}
+.sub-title {font-size:16px;color:gray;}
+.highlight {color:#4CAF50;}
+.side-card {
+    background:#f9f9f9;
+    padding:16px;
+    border-radius:14px;
+    margin-bottom:12px;
+    box-shadow:0 3px 8px rgba(0,0,0,0.08);
+}
+.side-title {font-size:18px;font-weight:700;}
+.side-desc {font-size:13px;color:gray;}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown('<div class="main-title">📄 Smart PDF Question Answering System</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="sub-title">RAG-based AI using <span class="highlight">FAISS + Transformers</span></div>',
+    unsafe_allow_html=True
+)
+st.markdown("---")
+# ===========================================
+
+# ================= SIDEBAR =================
+with st.sidebar:
+    st.markdown("""
+    <div class="side-card">
+        <div class="side-title">⚙️ Document Processing</div>
+        <div class="side-desc">Controls chunking & retrieval</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    chunk_size = st.slider("📦 Chunk Size", 200, 1200, CHUNK_SIZE, 100)
+    chunk_overlap = st.slider("🔁 Chunk Overlap", 0, 400, CHUNK_OVERLAP, 50)
+    top_k = st.slider("🎯 Top-K Results", 1, 8, TOP_K)
+
+    st.markdown("""
+    <div class="side-card">
+        <div class="side-title">🧠 Generator</div>
+        <div class="side-desc">Answer generation model</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    use_openai = st.toggle("✨ Use OpenAI (Optional)", value=False)
+    if use_openai:
+        openai_key = st.text_input("🔑 OpenAI API Key", type="password")
+
+    st.markdown("""
+    <div class="side-card">
+        <div class="side-title">🗑 Maintenance</div>
+        <div class="side-desc">Clear stored FAISS index</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.button("🧹 Clear Saved Index", use_container_width=True):
+        if os.path.exists(INDEX_DIR):
+            import shutil
+            shutil.rmtree(INDEX_DIR)
+            st.success("Index cleared")
+        else:
+            st.info("No index found")
+# ===========================================
+
+# ================= MODELS ==================
 @st.cache_resource
-def load_embedder():
+def load_embedding_model():
     return SentenceTransformer(EMBED_MODEL_NAME)
 
 @st.cache_resource
 def load_t5():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     tok = T5Tokenizer.from_pretrained(T5_MODEL_NAME)
-    model = T5ForConditionalGeneration.from_pretrained(T5_MODEL_NAME).to(device)
-    return tok, model, device
-# =========================================
+    mdl = T5ForConditionalGeneration.from_pretrained(T5_MODEL_NAME).to(device)
+    return tok, mdl, device
 
-# ============== HELPERS ===================
+embed_model = load_embedding_model()
+t5_tokenizer, t5_model, t5_device = load_t5()
+# ===========================================
+
+# ================= HELPERS =================
 def pdf_to_pages(pdf_bytes):
     reader = PdfReader(BytesIO(pdf_bytes))
     pages = []
     for i, p in enumerate(reader.pages):
-        pages.append({"page": i+1, "text": p.extract_text() or ""})
+        pages.append({"page": i + 1, "text": p.extract_text() or ""})
     return pages
 
-def chunk_pages(pages, size, overlap):
+def chunk_pages(pages):
     chunks = []
-    cid = 0
     for p in pages:
-        txt = p["text"]
-        i = 0
-        while i < len(txt):
-            piece = txt[i:i+size].strip()
-            if piece:
-                chunks.append({
-                    "chunk_id": cid,
-                    "text": piece,
-                    "source_pages": [p["page"]]
-                })
-                cid += 1
-            i += size - overlap
+        text = p["text"]
+        for i in range(0, len(text), chunk_size - chunk_overlap):
+            part = text[i:i + chunk_size]
+            if part.strip():
+                chunks.append({"text": part, "page": p["page"]})
     return chunks
+# ===========================================
 
-def build_index(emb):
-    faiss.normalize_L2(emb)
-    idx = faiss.IndexFlatIP(emb.shape[1])
-    idx.add(emb)
-    return idx
+# ================= MAIN APP =================
+uploader = st.file_uploader("📤 Upload a PDF document", type=["pdf"])
 
-def save_all(index, meta):
-    os.makedirs(INDEX_DIR, exist_ok=True)
-    faiss.write_index(index, INDEX_PATH)
-    with open(META_PATH, "wb") as f:
-        pickle.dump(meta, f)
+if uploader:
+    pages = pdf_to_pages(uploader.getvalue())
+    chunks = chunk_pages(pages)
 
-def load_all():
-    if os.path.exists(INDEX_PATH) and os.path.exists(META_PATH):
-        return faiss.read_index(INDEX_PATH), pickle.load(open(META_PATH, "rb"))
-    return None, None
+    texts = [c["text"] for c in chunks]
+    embeddings = embed_model.encode(texts, convert_to_numpy=True)
+    faiss.normalize_L2(embeddings)
 
-def generate_answer(tok, model, device, prompt):
-    inp = tok(prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
-    out = model.generate(**inp, max_length=512)
-    return tok.decode(out[0], skip_special_tokens=True)
-# =========================================
+    index = faiss.IndexFlatIP(embeddings.shape[1])
+    index.add(embeddings)
 
-# ================= UI =====================
-st.set_page_config("AI PDF Q&A", "📄", layout="wide")
+    st.success(f"PDF processed successfully • {len(chunks)} chunks created")
 
-st.markdown("""
-<style>
-.card {
-    background:#f8f9fa;
-    padding:20px;
-    border-radius:16px;
-    box-shadow:0 4px 10px rgba(0,0,0,.08);
-}
-</style>
-""", unsafe_allow_html=True)
+    st.markdown("## ❓ Ask Questions from Your Document")
+    st.caption("Relevant sections are retrieved and used to generate accurate answers.")
 
-st.title("📄 AI PDF Question Answering System")
-st.caption("PDF → FAISS → Transformer (RAG Pipeline)")
+    question = st.text_input("Type your question")
 
-# ============ SIDEBAR (NEW UI) ============
-with st.sidebar:
-    st.markdown("## ⚙️ Configuration")
-
-    st.markdown("<div class='card'>🔍 Retrieval Settings</div>", unsafe_allow_html=True)
-    chunk_size = st.slider("Chunk Size", 200, 1200, CHUNK_SIZE, 100)
-    chunk_overlap = st.slider("Chunk Overlap", 0, 400, CHUNK_OVERLAP, 50)
-    top_k = st.slider("Top-K Results", 1, 8, TOP_K)
-
-    st.markdown("<div class='card'>🧠 Generator</div>", unsafe_allow_html=True)
-    use_openai = st.toggle("Use OpenAI (optional)", False)
-    if use_openai:
-        openai_key = st.text_input("OpenAI API Key", type="password")
-
-    st.markdown("<div class='card'>🗑 Maintenance</div>", unsafe_allow_html=True)
-    if st.button("Clear FAISS Index"):
-        if os.path.exists(INDEX_DIR):
-            import shutil
-            shutil.rmtree(INDEX_DIR)
-            st.success("Index cleared")
-# =========================================
-
-embedder = load_embedder()
-tok = model = device = None
-if not use_openai:
-    tok, model, device = load_t5()
-
-uploaded = st.file_uploader("Upload PDF", type="pdf")
-
-if uploaded:
-    pages = pdf_to_pages(uploaded.getvalue())
-    chunks = chunk_pages(pages, chunk_size, chunk_overlap)
-
-    if st.button("Build / Rebuild Index"):
-        emb = embedder.encode([c["text"] for c in chunks], convert_to_numpy=True)
-        index = build_index(emb)
-        save_all(index, chunks)
-        st.success("Index built successfully")
-
-    index, meta = load_all()
-
-    st.markdown("---")
-    q = st.text_input("Ask a question from the PDF")
-
-    if q and index:
-        q_emb = embedder.encode([q], convert_to_numpy=True)
+    if question:
+        q_emb = embed_model.encode([question], convert_to_numpy=True)
         faiss.normalize_L2(q_emb)
-        D, I = index.search(q_emb, top_k)
 
-        context = ""
-        for i in I[0]:
-            context += meta[i]["text"] + "\n"
+        D, I = index.search(q_emb, top_k)
+        context = "\n\n".join([chunks[i]["text"] for i in I[0]])
 
         prompt = f"""
-Answer strictly from the context.
+Answer strictly using the context below.
 
 Context:
 {context}
 
 Question:
-{q}
+{question}
 
-Answer:
+Answer in 3–5 sentences.
 """
 
-        if use_openai and openai_key:
-            openai.api_key = openai_key
-            ans = openai.ChatCompletion.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}]
-            )["choices"][0]["message"]["content"]
-        else:
-            ans = generate_answer(tok, model, device, prompt)
+        inputs = t5_tokenizer(prompt, return_tensors="pt").to(t5_device)
+        outputs = t5_model.generate(**inputs, max_length=400)
+        answer = t5_tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-        st.markdown("### ✅ Answer")
-        st.success(ans)
+        st.subheader("🧠 Answer")
+        st.write(answer)
 else:
-    st.info("Upload a PDF to start.")
+    st.info("⬅ Upload a PDF file to begin")
+# ===========================================
