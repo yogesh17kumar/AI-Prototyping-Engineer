@@ -266,12 +266,16 @@ streamlit run app.py
 
 ```
 ├── app.py
-├── faiss_index/
+├── assests/
 ├── requirements.txt
 ├── README.md
 ```
 
 ---
+
+## 🔗 Live Demo
+https://ai-prototyping-engineer-cw789jqfdqfqyqrachz73a.streamlit.app/
+
 
 ## 📌 Future Improvements
 
