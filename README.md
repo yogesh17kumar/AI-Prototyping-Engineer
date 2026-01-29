@@ -207,8 +207,11 @@ User → UI (Streamlit)
      → LLM Orchestrator
      → Response
 ```
+## 🏢 System Architecture
 
+![Architecture Diagram](diagram.png)
 ---
+
 
 ### 🧱 Components Explained
 
@@ -266,7 +269,7 @@ streamlit run app.py
 
 ```
 ├── app.py
-├── assests/
+├── diagram.png
 ├── requirements.txt
 ├── README.md
 ```
