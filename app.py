@@ -6,7 +6,10 @@ Run: streamlit run app.py
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+import pickle
+from typing import List, Dict, Tuple, Optional
 from io import BytesIO
+
 import streamlit as st
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
@@ -18,11 +21,16 @@ import torch
 # ================= CONFIG =================
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 T5_MODEL_NAME = "google/flan-t5-small"
+EMBED_DIM = 384
+
+INDEX_DIR = "faiss_index"
+META_PATH = os.path.join(INDEX_DIR, "metadata.pkl")
+INDEX_PATH = os.path.join(INDEX_DIR, "index.faiss")
 
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 100
 TOP_K = 3
-# =========================================
+# ==========================================
 
 # ================= PAGE UI =================
 st.set_page_config(
@@ -71,12 +79,29 @@ with st.sidebar:
 
     st.markdown("""
     <div class="side-card">
-        <div class="side-title">🧠 Model Info</div>
-        <div class="side-desc">Local Transformer Model</div>
+        <div class="side-title">🧠 Generator</div>
+        <div class="side-desc">Answer generation model</div>
     </div>
     """, unsafe_allow_html=True)
 
-    st.write("Model:", T5_MODEL_NAME)
+    use_openai = st.toggle("✨ Use OpenAI (Optional)", value=False)
+    if use_openai:
+        openai_key = st.text_input("🔑 OpenAI API Key", type="password")
+
+    st.markdown("""
+    <div class="side-card">
+        <div class="side-title">🗑 Maintenance</div>
+        <div class="side-desc">Clear stored FAISS index</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.button("🧹 Clear Saved Index", use_container_width=True):
+        if os.path.exists(INDEX_DIR):
+            import shutil
+            shutil.rmtree(INDEX_DIR)
+            st.success("Index cleared")
+        else:
+            st.info("No index found")
 # ===========================================
 
 # ================= MODELS ==================
@@ -110,10 +135,7 @@ def chunk_pages(pages):
         for i in range(0, len(text), chunk_size - chunk_overlap):
             part = text[i:i + chunk_size]
             if part.strip():
-                chunks.append({
-                    "text": part,
-                    "page": p["page"]
-                })
+                chunks.append({"text": part, "page": p["page"]})
     return chunks
 # ===========================================
 
@@ -131,10 +153,10 @@ if uploader:
     index = faiss.IndexFlatIP(embeddings.shape[1])
     index.add(embeddings)
 
-    st.success(f"✅ PDF processed • {len(chunks)} chunks indexed")
+    st.success(f"PDF processed successfully • {len(chunks)} chunks created")
 
     st.markdown("## ❓ Ask Questions from Your Document")
-    st.caption("AI retrieves relevant sections and generates an answer")
+    st.caption("Relevant sections are retrieved and used to generate accurate answers.")
 
     question = st.text_input("Type your question")
 
@@ -143,20 +165,10 @@ if uploader:
         faiss.normalize_L2(q_emb)
 
         D, I = index.search(q_emb, top_k)
-
-        retrieved = []
-        for score, idx in zip(D[0], I[0]):
-            retrieved.append({
-                "score": float(score),
-                "text": chunks[idx]["text"],
-                "page": chunks[idx]["page"]
-            })
-
-        context = "\n\n".join([r["text"] for r in retrieved])
+        context = "\n\n".join([chunks[i]["text"] for i in I[0]])
 
         prompt = f"""
 Answer strictly using the context below.
-If not found, say answer not available.
 
 Context:
 {context}
@@ -171,30 +183,8 @@ Answer in 3–5 sentences.
         outputs = t5_model.generate(**inputs, max_length=400)
         answer = t5_tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-        # ===== CONFIDENCE SCORE =====
-        best_score = max(r["score"] for r in retrieved)
-        confidence = min(1.0, best_score * 1.4)
-        confidence_percent = int(confidence * 100)
-
-        # ===== DISPLAY =====
         st.subheader("🧠 Answer")
         st.write(answer)
-
-        st.markdown("### 📊 Answer Confidence")
-        st.progress(confidence_percent)
-
-        if confidence_percent >= 80:
-            st.success(f"High confidence — {confidence_percent}%")
-        elif confidence_percent >= 60:
-            st.warning(f"Medium confidence — {confidence_percent}%")
-        else:
-            st.error(f"Low confidence — {confidence_percent}%")
-
-        st.markdown("### 🔍 Retrieved Evidence")
-        for i, r in enumerate(retrieved):
-            st.write(
-                f"Snippet {i+1} | Page {r['page']} | Similarity {round(r['score'],3)}"
-            )
 else:
     st.info("⬅ Upload a PDF file to begin")
 # ===========================================
