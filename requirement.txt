@@ -8,3 +8,5 @@ pandas
 requests
 tqdm
 python-dotenv
+transformers
+scikit-learn
