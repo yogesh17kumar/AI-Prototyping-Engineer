@@ -5,6 +5,7 @@ Run: streamlit run app.py
 """
 
 import os
+import streamlit as st
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import tempfile
 import pickle
